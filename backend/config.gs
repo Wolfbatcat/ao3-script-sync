@@ -1,5 +1,5 @@
 /**
- * Configuration Management for ScriptSync
+ * Configuration Management for Script Sync
  * Handles caching and retrieval of settings from the Settings sheet
  */
 

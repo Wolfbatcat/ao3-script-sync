@@ -1,5 +1,5 @@
 /**
- * Sheet Operations for ScriptSync
+ * Sheet Operations for Script Sync
  * Direct interaction with Storage and Settings sheets
  */
 
@@ -20,14 +20,18 @@ function getStorageData() {
     return {};
   }
   
-  const data = storageSheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  const data = storageSheet.getRange(2, 1, lastRow - 1, 3).getValues();
   const storage = {};
   
   for (let i = 0; i < data.length; i++) {
     const key = data[i][0];
     const value = data[i][1];
+    const timestamp = data[i][2];
     if (key) {
-      storage[key] = value !== null && value !== undefined ? value.toString() : '';
+      storage[key] = {
+        value: value !== null && value !== undefined ? value.toString() : '',
+        timestamp: timestamp ? (parseInt(timestamp) || 0) : 0
+      };
     }
   }
   
@@ -52,11 +56,14 @@ function getStorageValue(key) {
     return null;
   }
   
-  const data = storageSheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  const data = storageSheet.getRange(2, 1, lastRow - 1, 3).getValues();
   
   for (let i = 0; i < data.length; i++) {
     if (data[i][0] === key) {
-      return data[i][1] !== null && data[i][1] !== undefined ? data[i][1].toString() : '';
+      return {
+        value: data[i][1] !== null && data[i][1] !== undefined ? data[i][1].toString() : '',
+        timestamp: data[i][2] ? (parseInt(data[i][2]) || 0) : 0
+      };
     }
   }
   
@@ -68,7 +75,7 @@ function getStorageValue(key) {
  * @param {string} key - Storage key
  * @param {string} value - Storage value
  */
-function setStorageValue(key, value) {
+function setStorageValue(key, value, timestamp) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const storageSheet = ss.getSheetByName(STORAGE_SHEET_NAME);
   
@@ -78,6 +85,7 @@ function setStorageValue(key, value) {
   
   // Convert value to string
   const stringValue = value !== null && value !== undefined ? value.toString() : '';
+  const ts = timestamp || Date.now();
   
   // Find existing row or append new one
   const lastRow = storageSheet.getLastRow();
@@ -92,11 +100,18 @@ function setStorageValue(key, value) {
   }
   
   if (rowIndex > 0) {
-    // Update existing row
-    storageSheet.getRange(rowIndex, 2).setValue(stringValue);
+    // Update existing row (value in col B, timestamp in col C)
+    storageSheet.getRange(rowIndex, 2, 1, 2).setValues([[stringValue, ts]]);
+    storageSheet.getRange(rowIndex, 4).setFormula(
+      `=IF(C${rowIndex}="","",TEXT((C${rowIndex}/1000/86400)+DATE(1970,1,1),"yyyy-mm-dd hh:mm:ss")&" UTC")`
+    );
   } else {
     // Append new row
-    storageSheet.appendRow([key, stringValue]);
+    const newRow = storageSheet.getLastRow() + 1;
+    storageSheet.getRange(newRow, 1, 1, 3).setValues([[key, stringValue, ts]]);
+    storageSheet.getRange(newRow, 4).setFormula(
+      `=IF(C${newRow}="","",TEXT((C${newRow}/1000/86400)+DATE(1970,1,1),"yyyy-mm-dd hh:mm:ss")&" UTC")`
+    );
   }
 }
 

@@ -1,5 +1,5 @@
 /**
- * HTTP Routes for ScriptSync
+ * HTTP Routes for Script Sync
  * Handles doGet, doPost, and doOptions (CORS)
  */
 

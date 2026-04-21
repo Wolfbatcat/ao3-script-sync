@@ -1,5 +1,5 @@
 /**
- * Request Handlers for ScriptSync
+ * Request Handlers for Script Sync
  * Business logic for all API endpoints
  */
 
@@ -163,6 +163,9 @@ function handleSync(queue) {
   try {
     let operationsProcessed = 0;
     
+    // Pre-load existing storage for timestamp-based conflict resolution
+    const existingStorage = getStorageData();
+    
     // Process operations if provided
     if (queue && queue.operations && Array.isArray(queue.operations)) {
       for (let i = 0; i < queue.operations.length; i++) {
@@ -174,8 +177,16 @@ function handleSync(queue) {
         
         // Handle set operation (update or create)
         if (op.value !== null && op.value !== undefined) {
-          setStorageValue(op.key, op.value);
-          operationsProcessed++;
+          // Timestamp conflict resolution: only write if incoming is newer or equal
+          const existing = existingStorage[op.key];
+          const storedTimestamp = existing ? (existing.timestamp || 0) : 0;
+          const incomingTimestamp = op.timestamp || 0;
+          if (incomingTimestamp >= storedTimestamp) {
+            setStorageValue(op.key, op.value, incomingTimestamp || Date.now());
+            operationsProcessed++;
+          } else {
+            Logger.log('Skipping stale update for key: ' + op.key + ' (incoming: ' + incomingTimestamp + ', stored: ' + storedTimestamp + ')');
+          }
         } else {
           // Handle delete operation (value is null/undefined)
           deleteStorageKey(op.key);
@@ -190,10 +201,10 @@ function handleSync(queue) {
     // Get current enabled keys
     const enabledKeys = getEnabledSyncKeys();
     
-    // Get all storage data
+    // Get all storage data (re-read after writes)
     const allStorageData = getStorageData();
     
-    // Filter to only enabled keys
+    // Filter to only enabled keys — return full {value, timestamp} objects
     const storageData = {};
     for (let i = 0; i < enabledKeys.length; i++) {
       const key = enabledKeys[i];

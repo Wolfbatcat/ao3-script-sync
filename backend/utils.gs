@@ -1,5 +1,5 @@
 /**
- * Utility Functions for ScriptSync
+ * Utility Functions for Script Sync
  * Response builders, lock management, error handling
  */
 

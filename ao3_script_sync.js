@@ -99,6 +99,43 @@
                     .ss-row-hidden {
                         display: none;
                     }
+
+                    /* Add spacing between wrapped button rows */
+                    #ss-container input[type="submit"] {
+                        margin-bottom: 4px;
+                    }
+
+                    /* Keep the AO3 question badge inline and label-sized */
+                    #ss-container label .symbol.question {
+                        font-size: 0.65em !important;
+                        vertical-align: middle;
+                    }
+
+                    /* Storage table: fit Select/Sync columns to content, truncate Key */
+                    #ss-storagelist th:nth-child(1),
+                    #ss-storagelist td:nth-child(1),
+                    #ss-storagelist th:nth-child(2),
+                    #ss-storagelist td:nth-child(2) {
+                        width: 1%;
+                        white-space: nowrap;
+                    }
+                    #ss-storagelist .ss-storage-key {
+                        max-width: 200px;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        white-space: nowrap;
+                    }
+
+                    /* Mobile: hide Content Preview, allow horizontal scroll */
+                    @media (max-width: 600px) {
+                        #ss-storagelist th:nth-child(5),
+                        #ss-storagelist td:nth-child(5) {
+                            display: none;
+                        }
+                        #ss-storagelist .ss-storage-key {
+                            max-width: 110px;
+                        }
+                    }
                     
                     /* Toggle switch styling */
                     .ss-sync-toggle {
@@ -136,7 +173,7 @@
                         border-radius: 50%;
                     }
                     .ss-sync-toggle input:checked + .ss-toggle-slider {
-                        background-color: #3e8fb0;
+                        background-color: #2e7d32;
                     }
                     .ss-sync-toggle input:checked + .ss-toggle-slider:before {
                         transform: translateX(1em);
@@ -189,7 +226,7 @@
           sheetUrl: "",
           syncEnabled: false,
           syncInterval: 60,
-          syncWidgetEnabled: true,
+          syncWidgetEnabled: false,
           syncWidgetOpacity: 0.8,
           selectedKeys: [],
           syncInitialized: false,
@@ -204,7 +241,7 @@
         sheetUrl: "",
         syncEnabled: false,
         syncInterval: 60,
-        syncWidgetEnabled: true,
+        syncWidgetEnabled: false,
         syncWidgetOpacity: 0.8,
         selectedKeys: [],
         syncInitialized: false,
@@ -402,11 +439,13 @@
           "#666",
           "none",
           "pointer",
-          this.timeUntilNextSync <= 0
+          !this.settings.syncEnabled
             ? "Sync now"
-            : this.timeUntilNextSync > 60
-              ? `${Math.floor(this.timeUntilNextSync / 60)}m ${this.timeUntilNextSync % 60}s`
-              : `${this.timeUntilNextSync}s`,
+            : this.timeUntilNextSync <= 0
+              ? "Sync now"
+              : this.timeUntilNextSync > 60
+                ? `${Math.floor(this.timeUntilNextSync / 60)}m ${this.timeUntilNextSync % 60}s`
+                : `${this.timeUntilNextSync}s`,
         ],
         syncing: [
           "#e3f2fd",
@@ -891,7 +930,7 @@
       if (storageList.length > 0) {
         html += `
                     <h2>Script Sync 🔄</h2>
-                    <p>Toggle sync for keys you want to sync across devices. Use checkboxes to select keys for export or deletion.</p>
+                    <p>Toggle sync for keys you want to sync across devices. Use checkboxes to select keys for export or deletion. <a href="https://greasyfork.org/en/scripts/568443" target="_blank">Read more.</a></p>
                     <p>
                         <input type="submit" value="${settings.hideUnsynced ? "Show All" : "Hide Un-synced"}" id="ss-toggle-unsynced">
                         <input type="submit" value="Select All" id="ss-select-all">
@@ -1031,6 +1070,7 @@
                             <label>
                                 <input type="checkbox" id="ss-sync-enabled" ${settings.syncEnabled ? "checked" : ""}>
                                 Enable automatic sync
+                                <span class="symbol question" title="When disabled, you can still sync manually using the Sync Now button or by clicking the sync status widget"><span>?</span></span>
                             </label>
                         </li>
                         <li>
@@ -1051,7 +1091,8 @@
             `;
 
       if (isInitialized) {
-        html += `
+        if (settings.syncEnabled) {
+          html += `
                         <li>
                             <label for="ss-sync-interval">Sync interval:</label>
                             <input type="range" id="ss-sync-interval" min="60" max="3600" step="60" value="${settings.syncInterval}" style="width: 200px; margin-right: 10px;">
@@ -1064,6 +1105,7 @@
                             <span id="ss-next-sync-countdown">${nextSyncText}</span></strong>
                         </li>
                 `;
+        }
 
         // Only show widget opacity if widget is enabled
         if (settings.syncWidgetEnabled) {
@@ -1089,7 +1131,6 @@
         html += `
                             <input type="submit" value="Test Connection" id="ss-test-connection" ${urlDisabled}>
                             <input type="submit" value="Initialize" id="ss-initialize" ${initDisabled}>
-                            ${settings.sheetUrl ? '<input type="submit" value="Clear Server Data" id="ss-clear-server">' : ""}
                 `;
       } else {
         html += `
@@ -1205,11 +1246,7 @@
         resetBtn.addEventListener("click", () => this.resetSync());
       }
 
-      // Clear server data
-      const clearServerBtn = q("#ss-clear-server");
-      if (clearServerBtn) {
-        clearServerBtn.addEventListener("click", () => this.clearServerData());
-      }
+
 
       // Sync enabled toggle
       const syncEnabled = q("#ss-sync-enabled");
@@ -1225,6 +1262,8 @@
             this.syncManager.stopSyncTimer();
             this.stopCountdownUpdater();
           }
+          this.hideStorageView();
+          this.showStorageView();
         });
       }
 
@@ -1506,7 +1545,7 @@
         return;
       }
 
-      const confirmMsg = `Are you sure you want to delete ${selectedKeys.length} selected item${selectedKeys.length === 1 ? "" : "s"} from localStorage?\n\nThis action cannot be undone.`;
+      const confirmMsg = `Are you sure you want to delete the selected item${selectedKeys.length === 1 ? "" : "s"} from your browser's local storage?\n\nNote: This does not remove data from your Google Sheet. If sync is still enabled for a deleted key, it will be restored on the next sync. To fully remove a key, disable its sync toggle first, then delete it here. To remove data from the sheet as well, delete the row directly in Google Sheets.`;
       if (!confirm(confirmMsg)) {
         return;
       }
@@ -1853,77 +1892,6 @@
       alert("Sync settings have been reset.");
     }
 
-    async clearServerData() {
-      if (
-        !confirm(
-          "This will clear all sync data from the Google Sheet, allowing you to re-initialize.\n\nYour local localStorage will not be affected.\n\nContinue?",
-        )
-      ) {
-        return;
-      }
-
-      const clearBtn = q("#ss-clear-server");
-      const originalText = clearBtn ? clearBtn.value : "";
-
-      if (clearBtn) {
-        clearBtn.value = "Clearing...";
-        clearBtn.disabled = true;
-      }
-      this.showStatus("Clearing server data...", "loading");
-
-      try {
-        const response = await this.syncManager.sendSyncRequest({
-          action: "initialize",
-          initData: {},
-          selectedKeys: [],
-          force: true,
-        });
-
-        if (response.status === "success") {
-          this.showStatus(
-            "Server data cleared. You can now initialize with your selected keys.",
-            "success",
-          );
-          const initBtn = q("#ss-initialize");
-          if (initBtn) {
-            initBtn.disabled = false;
-          }
-          if (clearBtn) {
-            clearBtn.value = "✓ Cleared";
-            setTimeout(() => {
-              clearBtn.value = originalText;
-              clearBtn.disabled = false;
-            }, 2000);
-          }
-        } else {
-          this.showStatus(
-            "Failed to clear server data: " +
-              (response.error?.message || "Unknown error"),
-            "error",
-          );
-          if (clearBtn) {
-            clearBtn.value = "✗ Failed";
-            setTimeout(() => {
-              clearBtn.value = originalText;
-              clearBtn.disabled = false;
-            }, 2000);
-          }
-        }
-      } catch (error) {
-        this.showStatus(
-          "Failed to clear server data: " + error.message,
-          "error",
-        );
-        if (clearBtn) {
-          clearBtn.value = "✗ Failed";
-          setTimeout(() => {
-            clearBtn.value = originalText;
-            clearBtn.disabled = false;
-          }, 2000);
-        }
-      }
-    }
-
     changeUrl() {
       if (
         !confirm(
@@ -2125,6 +2093,8 @@
         FT_kudosGiven:
           '<a href="https://greasyfork.org/en/scripts/566605">AO3 FicTracker - BlackBatCats Version</a>',
         FT_subscribed:
+          '<a href="https://greasyfork.org/en/scripts/566605">AO3 FicTracker - BlackBatCats Version</a>',
+        FT_uiConfig:
           '<a href="https://greasyfork.org/en/scripts/566605">AO3 FicTracker - BlackBatCats Version</a>',
       };
 

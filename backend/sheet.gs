@@ -39,38 +39,6 @@ function getStorageData() {
 }
 
 /**
- * Get a specific storage value
- * @param {string} key - Storage key
- * @returns {string|null} Storage value or null if not found
- */
-function getStorageValue(key) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const storageSheet = ss.getSheetByName(STORAGE_SHEET_NAME);
-  
-  if (!storageSheet) {
-    return null;
-  }
-  
-  const lastRow = storageSheet.getLastRow();
-  if (lastRow < 2) {
-    return null;
-  }
-  
-  const data = storageSheet.getRange(2, 1, lastRow - 1, 3).getValues();
-  
-  for (let i = 0; i < data.length; i++) {
-    if (data[i][0] === key) {
-      return {
-        value: data[i][1] !== null && data[i][1] !== undefined ? data[i][1].toString() : '',
-        timestamp: data[i][2] ? (parseInt(data[i][2]) || 0) : 0
-      };
-    }
-  }
-  
-  return null;
-}
-
-/**
  * Set a storage value (update existing or append new)
  * @param {string} key - Storage key
  * @param {string} value - Storage value

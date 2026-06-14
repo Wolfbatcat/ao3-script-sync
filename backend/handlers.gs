@@ -12,18 +12,6 @@ function handlePing() {
 }
 
 /**
- * Handle get_last_modified request
- * @returns {ContentService.TextOutput} Last modified timestamp
- */
-function handleGetLastModified() {
-  const lastModified = getConfigValue('_last_modified', new Date().toISOString());
-  
-  return createSuccessResponse({
-    last_modified: lastModified
-  });
-}
-
-/**
  * Handle get_storage request
  * Returns storage data for requested keys
  * When requestedKeys is empty/null, returns metadata (enabled_keys) for server probing
@@ -80,59 +68,50 @@ function handleGetStorage(requestedKeys) {
  * Sets up the database with initial data
  * @param {Object} initData - Initial data to populate (key-value pairs)
  * @param {Array} selectedKeys - Array of keys selected for syncing
- * @param {boolean} force - If true, clear existing data and re-initialize
  * @returns {ContentService.TextOutput} Success or error response
  */
-function handleInitialize(initData, selectedKeys, force) {
+function handleInitialize(initData, selectedKeys) {
   // Validate sheet structure
   const validation = validateSheetStructure();
   if (!validation.valid) {
     return createErrorResponse('Sheet structure invalid: ' + validation.errors.join(', '), 500);
   }
-  
-  // Check if already initialized (unless force is true)
-  if (!force && isDatabaseInitialized()) {
+
+  // Check if already initialized
+  if (isDatabaseInitialized()) {
     return createErrorResponse('Database already initialized. Use "Reset Sync Settings" to re-initialize.', 400);
   }
-  
+
   // Acquire lock for initialization
   const lock = acquireLock(10000);
   if (!lock) {
     return createErrorResponse('Could not acquire lock. Please try again.', 503);
   }
-  
+
   try {
     // Clear existing data
     clearStorageSheet();
-    
-    // If force is true with no data, we're just clearing - don't mark as initialized
-    const isClearing = force && (!initData || Object.keys(initData).length === 0) && (!selectedKeys || selectedKeys.length === 0);
-    
+
     // Set initial data
     if (initData && typeof initData === 'object') {
       setMultipleStorageValues(initData);
     }
-    
+
     // Set enabled sync keys
     if (selectedKeys && Array.isArray(selectedKeys)) {
       setEnabledSyncKeys(selectedKeys);
     }
-    
-    // Mark as initialized (unless we're just clearing)
-    if (!isClearing) {
-      setConfigValue('_connected_to_AO3', 'TRUE');
-    } else {
-      // Clear the initialized flag
-      setConfigValue('_connected_to_AO3', '');
-    }
-    
+
+    // Mark as initialized
+    setConfigValue('_connected_to_AO3', 'TRUE');
+
     // Update last modified timestamp
     updateLastModified();
-    
+
     releaseLock(lock);
-    
+
     return createSuccessResponse({
-      message: isClearing ? 'Successfully cleared server data!' : 'Successfully initialized database!',
+      message: 'Successfully initialized database!',
       keys_synced: selectedKeys || []
     });
   } catch (error) {
@@ -195,11 +174,13 @@ function handleSync(queue) {
       }
     }
     
-    // Update last modified timestamp
-    updateLastModified();
-    
-    // Get current enabled keys
+    // Get current enabled keys before any cache invalidation
     const enabledKeys = getEnabledSyncKeys();
+
+    // Only write last-modified if data actually changed
+    if (operationsProcessed > 0) {
+      updateLastModified();
+    }
     
     // Get all storage data (re-read after writes)
     const allStorageData = getStorageData();

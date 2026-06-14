@@ -1,16 +1,13 @@
 // ==UserScript==
 // @name         AO3: Script Sync
 // @namespace    https://github.com/Wolfbatcat/ao3-script-sync
-// @version      1.0.2
-// @description  Sync AO3 userscript settings across devices via Google Sheets. Select which localStorage keys to sync and configure automatic sync intervals.
+// @version      1.0.4
+// @description  Sync AO3 userscript settings and data across devices. View, export, import, and delete data stored by any userscript.
 // @author       BlackBatCat
 // @license      MIT
 // @match        *://*.archiveofourown.org/*
 // @grant        GM_xmlhttpRequest
 // @run-at       document-end
-// @supportURL   https://github.com/Wolfbatcat/ao3-script-sync/issues
-// @downloadURL  https://github.com/Wolfbatcat/ao3-script-sync/raw/main/ao3_universal_sync.user.js
-// @updateURL    https://github.com/Wolfbatcat/ao3-script-sync/raw/main/ao3_universal_sync.user.js
 // ==/UserScript==
 
 (function () {
@@ -268,6 +265,186 @@
   }
 
   // ============================================================================
+  // FICTRACKER COMPATIBILITY
+  // ============================================================================
+
+  class FicTrackerCompat {
+    constructor(onStatusChange = null) {
+      this.onStatusChange = onStatusChange;
+      this.bodyObserver = null;
+      this.widgetObserver = null;
+      this.widget = null;
+    }
+
+    init() {
+      this.detectAndHideWidget();
+
+      if (!document.body) return;
+      if (this.bodyObserver) return;
+
+      this.bodyObserver = new MutationObserver((mutations) => {
+        // Only react if a node was added that is (or contains) the FT widget.
+        // Ignoring SS's own insertions prevents a feedback loop where
+        // updateWidget() adding #ss-sync-widget re-triggers this observer.
+        const ftWidgetAdded = mutations.some((mutation) => {
+          for (const node of mutation.addedNodes) {
+            if (node.nodeType !== 1) continue;
+            if (node.id === "ft-sync-widget") return true;
+            if (node.querySelector && node.querySelector("#ft-sync-widget"))
+              return true;
+          }
+          return false;
+        });
+        if (ftWidgetAdded && this.detectAndHideWidget()) {
+          this.notifyStatusChange();
+        }
+      });
+
+      this.bodyObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+      });
+    }
+
+    destroy() {
+      if (this.bodyObserver) {
+        this.bodyObserver.disconnect();
+        this.bodyObserver = null;
+      }
+      if (this.widgetObserver) {
+        this.widgetObserver.disconnect();
+        this.widgetObserver = null;
+      }
+      this.restoreWidget();
+      this.widget = null;
+    }
+
+    detectAndHideWidget() {
+      const widget = document.getElementById("ft-sync-widget");
+      if (!widget) return false;
+
+      const isNewWidget = widget !== this.widget;
+      this.widget = widget;
+      this.hideWidget(widget);
+
+      if (isNewWidget) {
+        this.observeWidget(widget);
+      }
+
+      return true;
+    }
+
+    hideWidget(widget) {
+      if (widget.dataset.scriptSyncUnified !== "true") {
+        widget.dataset.scriptSyncPreviousDisplay = widget.style.display || "";
+      }
+      if (widget.style.display !== "none") {
+        widget.style.display = "none";
+      }
+      if (widget.getAttribute("aria-hidden") !== "true") {
+        widget.setAttribute("aria-hidden", "true");
+      }
+      if (widget.dataset.scriptSyncUnified !== "true") {
+        widget.dataset.scriptSyncUnified = "true";
+      }
+    }
+
+    restoreWidget() {
+      if (!this.widget || this.widget.dataset.scriptSyncUnified !== "true") {
+        return;
+      }
+
+      this.widget.style.display =
+        this.widget.dataset.scriptSyncPreviousDisplay || "";
+      this.widget.removeAttribute("aria-hidden");
+      delete this.widget.dataset.scriptSyncUnified;
+      delete this.widget.dataset.scriptSyncPreviousDisplay;
+    }
+
+    observeWidget(widget) {
+      if (this.widgetObserver) {
+        this.widgetObserver.disconnect();
+      }
+
+      this.widgetObserver = new MutationObserver((mutations) => {
+        // Ignore mutations caused by SS itself (setting display:none, aria-hidden, data attrs)
+        const externalMutation = mutations.some((m) => {
+          if (m.type === "attributes") {
+            const attr = m.attributeName;
+            return (
+              attr !== "style" &&
+              attr !== "aria-hidden" &&
+              !attr.startsWith("data-")
+            );
+          }
+          return m.type === "childList" || m.type === "characterData";
+        });
+
+        // Temporarily disconnect while we write to avoid triggering ourselves
+        this.widgetObserver.disconnect();
+        this.hideWidget(widget);
+        this.widgetObserver.observe(widget, {
+          attributes: true,
+          childList: true,
+          characterData: true,
+          subtree: true,
+        });
+
+        if (externalMutation) {
+          this.notifyStatusChange();
+        }
+      });
+
+      this.widgetObserver.observe(widget, {
+        attributes: true,
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+    }
+
+    notifyStatusChange() {
+      if (typeof this.onStatusChange === "function") {
+        this.onStatusChange();
+      }
+    }
+
+    getPendingCount() {
+      this.detectAndHideWidget();
+
+      const badge = document.getElementById("ft-sync-badge");
+      if (!badge || badge.style.display === "none") return 0;
+
+      const count = parseInt(badge.textContent, 10);
+      return Number.isFinite(count) ? count : 0;
+    }
+
+    getWidgetState() {
+      this.detectAndHideWidget();
+
+      if (!this.widget) return "missing";
+
+      const text = (this.widget.textContent || "").toLowerCase();
+      if (text.includes("syncing")) return "syncing";
+      if (text.includes("offline")) return "offline";
+      if (text.includes("failed")) return "failed";
+      return "ready";
+    }
+
+    triggerSync() {
+      this.detectAndHideWidget();
+
+      if (!this.widget) return false;
+
+      const state = this.getWidgetState();
+      if (state === "syncing" || state === "offline") return false;
+
+      this.widget.click();
+      return true;
+    }
+  }
+
+  // ============================================================================
   // REMOTE SYNC MANAGER
   // ============================================================================
 
@@ -277,11 +454,17 @@
       this.isOnline = navigator.onLine;
       this.isSyncing = false;
       this.syncTimer = null;
+      this.syncTimeout = null;
       this.countdownTimer = null;
       this.widget = null;
       this.syncBadge = null;
       this.timeUntilNextSync = 0;
       this.settings = this.storage.getSettings();
+      this.ficTrackerCompat = new FicTrackerCompat(() => {
+        if (this.widget) {
+          this.updateWidget(this.isSyncing ? "syncing" : "normal");
+        }
+      });
     }
 
     init() {
@@ -306,10 +489,6 @@
         if (!(this.settings.selectedKeys || []).includes(e.key)) return;
         if (e.newValue === null) return; // deletion, not an update
         this.addPendingChange(e.key, e.newValue);
-        console.log(
-          "[AO3: Script Sync] Detected cross-tab storage change for key:",
-          e.key,
-        );
       });
 
       // Queue any local changes made since the last sync
@@ -318,6 +497,7 @@
         const snapshot = this.storage.getItem("lastSyncSnapshot", {});
         const writeTimestamps = this.storage.getItem("writeTimestamps", {});
         let timestampsCleared = false;
+        let startupChangesCount = 0;
         (this.settings.selectedKeys || []).forEach((key) => {
           if (key.startsWith("SS_")) return;
           const current = localStorage.getItem(key);
@@ -335,13 +515,15 @@
             return;
           }
           if (current !== snapshot[key]) {
-            this.addPendingChange(key, current);
-            console.log(
-              "[AO3: Script Sync] Queued startup local change for key:",
-              key,
-            );
+            this.addPendingChange(key, current, writeTimestamps[key]);
+            startupChangesCount++;
           }
         });
+        if (startupChangesCount > 0) {
+          console.log(
+            `[AO3: Script Sync] Queued ${startupChangesCount} local change(s) from previous page load`,
+          );
+        }
         if (timestampsCleared) {
           this.storage.setItem("writeTimestamps", writeTimestamps);
         }
@@ -364,6 +546,7 @@
     }
 
     removeWidget() {
+      this.ficTrackerCompat.destroy();
       if (this.widget) {
         this.widget.remove();
         this.widget = null;
@@ -374,6 +557,8 @@
     updateWidget(state = "normal") {
       if (!this.settings.syncWidgetEnabled || !this.settings.syncInitialized)
         return;
+
+      this.ficTrackerCompat.init();
 
       // Create widget if it doesn't exist
       if (!this.widget) {
@@ -404,8 +589,7 @@
         }
 
         // Click handler
-        this.widget.onclick = () =>
-          this.isOnline && !this.isSyncing && this.performSync();
+        this.widget.onclick = () => this.performUnifiedWidgetSync();
 
         // Hover effects
         this.widget.onmouseenter = () =>
@@ -423,7 +607,9 @@
       }
 
       // Update badge based on pending count
-      const pendingCount = this.getPendingChanges().operations.length;
+      const pendingCount =
+        this.getPendingChanges().operations.length +
+        this.ficTrackerCompat.getPendingCount();
       if (pendingCount > 0) {
         this.syncBadge.style.display = "inline-block";
         this.syncBadge.textContent = pendingCount;
@@ -463,7 +649,30 @@
           "pointer",
           "Synced!",
         ],
-        error: ["#ffebee", "#f44336", "#c62828", "none", "pointer", "Failed"],
+        error: [
+          "#ffebee",
+          "#f44336",
+          "#c62828",
+          "none",
+          "pointer",
+          "SS Failed",
+        ],
+        "ft-error": [
+          "#ffebee",
+          "#f44336",
+          "#c62828",
+          "none",
+          "pointer",
+          "FT Failed",
+        ],
+        "both-error": [
+          "#ffebee",
+          "#f44336",
+          "#c62828",
+          "none",
+          "pointer",
+          "Both Failed",
+        ],
         offline: ["#f5f5f5", "#ccc", "#999", "none", "default", "Offline"],
       };
 
@@ -489,6 +698,13 @@
       }
     }
 
+    async performUnifiedWidgetSync() {
+      if (!this.isOnline || this.isSyncing) return;
+
+      await this.performSync();
+      this.ficTrackerCompat.triggerSync();
+    }
+
     updateCountdown() {
       // Decrement timeUntilNextSync and update widget
       if (this.timeUntilNextSync > 0) {
@@ -504,17 +720,27 @@
       const lastSync = this.settings.lastSync;
       const syncInterval = this.settings.syncInterval * 1000;
       const timeSinceLastSync = now - lastSync;
+      // Small random offset (±15s) so devices don't fire simultaneously and compete for the backend lock
+      const jitter = (Math.random() * 30 - 15) * 1000;
 
       if (timeSinceLastSync >= syncInterval) {
-        // Sync immediately, then start interval
-        this.timeUntilNextSync = 0;
-        this.performSync();
-        this.syncTimer = setInterval(() => this.performSync(), syncInterval);
+        // Sync immediately (with jitter), then start interval
+        const initialDelay = Math.max(0, jitter);
+        this.timeUntilNextSync = Math.ceil(initialDelay / 1000);
+        this.syncTimeout = setTimeout(() => {
+          this.syncTimeout = null;
+          this.performSync();
+          this.syncTimer = setInterval(() => this.performSync(), syncInterval);
+        }, initialDelay);
       } else {
-        // Wait for remaining time, then start interval
-        const timeUntilNextSync = syncInterval - timeSinceLastSync;
+        // Wait for remaining time (with jitter), then start interval
+        const timeUntilNextSync = Math.max(
+          0,
+          syncInterval - timeSinceLastSync + jitter,
+        );
         this.timeUntilNextSync = Math.ceil(timeUntilNextSync / 1000);
-        setTimeout(() => {
+        this.syncTimeout = setTimeout(() => {
+          this.syncTimeout = null;
           this.performSync();
           this.syncTimer = setInterval(() => this.performSync(), syncInterval);
         }, timeUntilNextSync);
@@ -527,6 +753,10 @@
     }
 
     stopSyncTimer() {
+      if (this.syncTimeout) {
+        clearTimeout(this.syncTimeout);
+        this.syncTimeout = null;
+      }
       if (this.syncTimer) {
         clearInterval(this.syncTimer);
         this.syncTimer = null;
@@ -557,20 +787,19 @@
       this.updateWidget("offline");
     }
 
-    addPendingChange(key, value) {
-      const timestamp = Date.now();
+    addPendingChange(key, value, timestamp) {
+      const ts = timestamp || Date.now();
 
       // Record local write timestamp for conflict resolution
       const writeTimestamps = this.storage.getItem("writeTimestamps", {});
-      writeTimestamps[key] = timestamp;
+      writeTimestamps[key] = ts;
       this.storage.setItem("writeTimestamps", writeTimestamps);
 
-      // Deduplicate: replace existing pending entry for this key rather than appending
       const pendingChanges = this.getPendingChanges();
       const existingIndex = pendingChanges.operations.findIndex(
         (op) => op.key === key,
       );
-      const operation = { key, value, timestamp };
+      const operation = { key, value, timestamp: ts };
       if (existingIndex >= 0) {
         pendingChanges.operations[existingIndex] = operation;
       } else {
@@ -622,7 +851,6 @@
               enabledKeys: pendingEnabledKeys,
             });
             this.storage.removeItem("pendingEnabledKeysUpdate");
-            console.log("[AO3: Script Sync] Flushed pending enabled keys update");
           } catch (keysError) {
             console.error(
               "[AO3: Script Sync] Failed to flush pending enabled keys, will retry next sync:",
@@ -632,7 +860,6 @@
         }
 
         // Detect local changes that weren't explicitly queued
-        // (e.g. a userscript updated localStorage directly since last sync)
         const snapshot = this.storage.getItem("lastSyncSnapshot", {});
         const pendingChanges = this.getPendingChanges();
         const alreadyQueued = new Set(
@@ -640,6 +867,7 @@
         );
         const writeTimestamps = this.storage.getItem("writeTimestamps", {});
         let writeTimestampsChanged = false;
+        let unqueuedCount = 0;
         const enabledKeys = this.settings.selectedKeys || [];
         enabledKeys.forEach((key) => {
           if (key.startsWith("SS_")) return;
@@ -650,12 +878,14 @@
             writeTimestamps[key] = timestamp;
             writeTimestampsChanged = true;
             pendingChanges.operations.push({ key, value: current, timestamp });
-            console.log(
-              "[AO3: Script Sync] Detected unqueued local change for key:",
-              key,
-            );
+            unqueuedCount++;
           }
         });
+        if (unqueuedCount > 0) {
+          console.log(
+            `[AO3: Script Sync] Queued ${unqueuedCount} untracked local change(s)`,
+          );
+        }
         if (writeTimestampsChanged) {
           this.storage.setItem("writeTimestamps", writeTimestamps);
         }
@@ -689,10 +919,6 @@
             if (isDifferent) {
               this.settings.selectedKeys = serverKeys;
               this.storage.saveSetting("selectedKeys", serverKeys);
-              console.log(
-                "[AO3: Script Sync] Reconciled selectedKeys from server:",
-                serverKeys,
-              );
             }
           }
 
@@ -706,20 +932,28 @@
           // Reset countdown
           this.timeUntilNextSync = this.settings.syncInterval;
 
-          this.updateWidget("success");
+          // Check if FT's sync also succeeded before showing combined state
+          const ftState = this.ficTrackerCompat.getWidgetState();
+          if (ftState === "failed") {
+            this.updateWidget("ft-error");
+          } else {
+            this.updateWidget("success");
+          }
           console.log("[AO3: Script Sync] Sync successful");
         } else {
           throw new Error("Sync response indicates failure");
         }
       } catch (error) {
         console.error("[AO3: Script Sync] Sync error:", error);
-        this.updateWidget("error");
+        const ftState = this.ficTrackerCompat.getWidgetState();
+        this.updateWidget(ftState === "failed" ? "both-error" : "error");
+        return false;
       } finally {
         this.isSyncing = false;
       }
     }
 
-    sendSyncRequest(data) {
+    sendSyncRequest(data, { retryOnLock = true } = {}) {
       return new Promise((resolve, reject) => {
         console.log(
           "[AO3: Script Sync] Sending request:",
@@ -734,22 +968,34 @@
           headers: { "Content-Type": "application/json" },
           anonymous: true,
           data: JSON.stringify(data),
-          timeout: 30000, // Increased to 30 seconds for initialization
+          timeout: 30000,
           onload: (response) => {
-            console.log(
-              "[AO3: Script Sync] Response status:",
-              response.status,
-              "Response text:",
-              response.responseText.substring(0, 200),
-            );
             try {
               const jsonResponse = JSON.parse(response.responseText);
               if (jsonResponse.status === "success") {
                 resolve(jsonResponse);
               } else {
-                reject(
-                  new Error(jsonResponse.error?.message || "Unknown error"),
-                );
+                // Retry once after 10s if the server was busy (lock contention)
+                const isLockError =
+                  retryOnLock &&
+                  (response.status === 503 ||
+                    (jsonResponse.error?.message || "")
+                      .toLowerCase()
+                      .includes("sync in progress"));
+                if (isLockError) {
+                  console.log(
+                    "[AO3: Script Sync] Server busy, retrying in 10s...",
+                  );
+                  setTimeout(() => {
+                    this.sendSyncRequest(data, { retryOnLock: false })
+                      .then(resolve)
+                      .catch(reject);
+                  }, 10000);
+                } else {
+                  reject(
+                    new Error(jsonResponse.error?.message || "Unknown error"),
+                  );
+                }
               }
             } catch (e) {
               console.error("[AO3: Script Sync] Failed to parse response:", e);
@@ -766,7 +1012,9 @@
             reject(new Error("Network error: " + (error.error || error)));
           },
           ontimeout: () => {
-            console.error("[AO3: Script Sync] Request timeout after 30 seconds");
+            console.error(
+              "[AO3: Script Sync] Request timeout after 30 seconds",
+            );
             reject(new Error("Request timeout (30s)"));
           },
         });
@@ -793,7 +1041,6 @@
             : 0;
         const localTimestamp = writeTimestamps[key] || 0;
 
-        // Skip corrupted values (written by old client when backend was first updated)
         if (
           serverValue === null ||
           serverValue === undefined ||
@@ -811,22 +1058,16 @@
           localStorage.setItem(key, serverValue);
           writeTimestamps[key] = serverTimestamp;
           timestampsChanged = true;
-        } else {
-          console.log(
-            "[AO3: Script Sync] Keeping local value for key (local is newer):",
-            key,
-          );
         }
       }
 
       if (timestampsChanged) {
         this.storage.setItem("writeTimestamps", writeTimestamps);
       }
-
-      console.log("[AO3: Script Sync] Local storage updated with server data");
     }
 
     destroy() {
+      this.ficTrackerCompat.destroy();
       this.stopSyncTimer();
       this.removeWidget();
     }
@@ -849,7 +1090,7 @@
       if (window.location.pathname !== "/") return;
 
       if (this.menuInjected) return;
-      // Guard against duplicate injection when multiple instances run (e.g. script installed twice)
+
       if (q("#ss-open-storage")) return;
 
       // Create or find userscripts menu
@@ -1008,14 +1249,12 @@
 
       html += `</div>`;
 
-      // Insert into page
       if (stdContent) {
         ins(stdContent, "beforebegin", html);
       } else {
         ins(q("body"), "beforeend", html);
       }
 
-      // Setup event listeners
       this.setupEventListeners();
     }
 
@@ -1107,7 +1346,6 @@
                 `;
         }
 
-        // Only show widget opacity if widget is enabled
         if (settings.syncWidgetEnabled) {
           html += `
                         <li>
@@ -1186,7 +1424,7 @@
         });
       }
 
-      // Select all/none buttons (for selection checkboxes)
+      // Select all/none buttons
       const selectAll = q("#ss-select-all");
       if (selectAll) {
         selectAll.addEventListener("click", () => {
@@ -1246,8 +1484,6 @@
         resetBtn.addEventListener("click", () => this.resetSync());
       }
 
-
-
       // Sync enabled toggle
       const syncEnabled = q("#ss-sync-enabled");
       if (syncEnabled) {
@@ -1278,7 +1514,6 @@
           } else {
             this.syncManager.removeWidget();
           }
-          // Refresh the view to show/hide opacity slider
           this.hideStorageView();
           this.showStorageView();
         });
@@ -1316,7 +1551,6 @@
         });
       }
 
-      // Start countdown updater if initialized and enabled
       const settings = this.storage.getSettings();
       if (settings.syncInitialized && settings.syncEnabled) {
         this.startCountdownUpdater();
@@ -1344,31 +1578,20 @@
         syncBtn.disabled = true;
       }
 
-      try {
-        await this.syncManager.performSync();
+      const success = await this.syncManager.performSync();
 
-        // Show success on button
-        if (syncBtn) {
-          syncBtn.value = "✓ Synced";
-          setTimeout(() => {
-            syncBtn.value = originalText;
-            syncBtn.disabled = false;
-          }, 2000);
-        }
-      } catch (error) {
-        if (syncBtn) {
-          syncBtn.value = "✗ Failed";
-          setTimeout(() => {
-            syncBtn.value = originalText;
-            syncBtn.disabled = false;
-          }, 2000);
-        }
+      if (syncBtn) {
+        syncBtn.value = success === false ? "✗ Failed" : "✓ Synced";
+        setTimeout(() => {
+          syncBtn.value = originalText;
+          syncBtn.disabled = false;
+        }, 2000);
       }
     }
 
     handleSyncToggle(event) {
-      // Auto-save when sync toggle changes
-      const oldSelectedKeys = this.storage.getSettings().selectedKeys;
+      const settings = this.storage.getSettings();
+      const oldSelectedKeys = settings.selectedKeys;
       const selectedKeys = [];
       qa(".ss-sync-check:checked").forEach((cb) => {
         selectedKeys.push(cb.dataset.key);
@@ -1385,8 +1608,6 @@
           row.classList.remove("ss-unsynced-row");
         } else {
           row.classList.add("ss-unsynced-row");
-          // If currently hiding un-synced rows, hide this one too
-          const settings = this.storage.getSettings();
           if (settings.hideUnsynced) {
             row.classList.add("ss-row-hidden");
           }
@@ -1394,8 +1615,7 @@
       }
 
       // If already initialized, update server
-      if (this.storage.getSettings().syncInitialized) {
-        // Find newly enabled keys
+      if (settings.syncInitialized) {
         const newlyEnabledKeys = selectedKeys.filter(
           (key) => !oldSelectedKeys.includes(key),
         );
@@ -1406,10 +1626,6 @@
             const value = localStorage.getItem(key);
             if (value !== null) {
               this.syncManager.addPendingChange(key, value);
-              console.log(
-                "[AO3: Script Sync] Added pending change for newly enabled key:",
-                key,
-              );
             }
           });
         }
@@ -1427,7 +1643,6 @@
         // Clear any previously queued retry
         this.storage.removeItem("pendingEnabledKeysUpdate");
         this.showStatus("Sync keys updated on server", "success");
-        console.log("[AO3: Script Sync] Server enabled keys updated");
       } catch (error) {
         // Queue for retry on next sync
         this.storage.setItem("pendingEnabledKeysUpdate", keys);
@@ -1507,7 +1722,6 @@
             ) {
               this.syncManager.addPendingChange(key, value);
               syncedKeysCount++;
-              console.log("[AO3: Script Sync] Queued imported key for sync:", key);
             }
           });
 
@@ -1518,10 +1732,7 @@
             message += `\n\n${syncedKeysCount} synced key${syncedKeysCount === 1 ? "" : "s"} will be uploaded to the server.`;
 
             // Auto-trigger sync to upload changes
-            setTimeout(() => {
-              console.log("[AO3: Script Sync] Auto-triggering sync after import");
-              this.syncManager.performSync();
-            }, 1000);
+            setTimeout(() => this.syncManager.performSync(), 1000);
           }
 
           alert(message);
@@ -1666,16 +1877,13 @@
         initBtn.disabled = true;
       }
       this.showStatus("Connecting to Google Sheet...", "loading");
-      console.log("[AO3: Script Sync] Starting initialization");
 
       try {
-        // Step 1: Probe server for existing enabled_keys (non-destructive check)
         this.showStatus("Checking for existing configuration...", "loading");
         let serverProbeResponse;
         let serverEnabledKeys = [];
 
         try {
-          // Send probe with empty requestedKeys to get metadata
           serverProbeResponse = await this.syncManager.sendSyncRequest({
             action: "get_storage",
             requestedKeys: [],
@@ -1684,29 +1892,14 @@
           const serverInitialized =
             serverProbeResponse.data?.initialized || false;
           serverEnabledKeys = serverProbeResponse.data?.enabled_keys || [];
-          console.log(
-            "[AO3: Script Sync] Server probe: initialized=" +
-              serverInitialized +
-              ", keys=" +
-              serverEnabledKeys.length,
-            serverEnabledKeys,
-          );
 
-          // If server has enabled keys, adopt them (server is source of truth)
           if (serverInitialized && serverEnabledKeys.length > 0) {
             const serverData = serverProbeResponse.data?.storage_data || {};
-
-            console.log(
-              "[AO3: Script Sync] Server already configured with",
-              serverEnabledKeys.length,
-              "keys. Adopting server configuration.",
-            );
             this.showStatus(
               `Found existing configuration with ${serverEnabledKeys.length} key(s). Downloading...`,
               "loading",
             );
 
-            // Download all server data
             const initWriteTimestamps = this.storage.getItem(
               "writeTimestamps",
               {},
@@ -1723,16 +1916,13 @@
                   : 0;
               localStorage.setItem(key, value);
               if (ts) initWriteTimestamps[key] = ts;
-              console.log("[AO3: Script Sync] Downloaded key:", key);
             });
             this.storage.setItem("writeTimestamps", initWriteTimestamps);
 
-            // Adopt server's enabled keys list
             selectedKeys = serverEnabledKeys;
             this.storage.saveSetting("selectedKeys", selectedKeys);
             this.syncManager.settings.selectedKeys = selectedKeys;
 
-            // Mark as initialized and enable auto-sync by default
             this.storage.saveSetting("syncInitialized", true);
             this.storage.saveSetting("lastSync", Date.now());
             this.storage.saveSetting("syncEnabled", true);
@@ -1747,31 +1937,23 @@
               `Initialized! Downloaded ${serverEnabledKeys.length} key(s) from server. Auto-sync enabled.`,
               "success",
             );
-            console.log(
-              "[AO3: Script Sync] Initialization successful (adopted server configuration)",
-            );
+            console.log("[AO3: Script Sync] Initialization successful");
 
-            // Show success on button
             if (initBtn) {
               initBtn.value = "✓ Initialized";
             }
 
-            // Refresh the view to show sync options
             setTimeout(() => {
               this.hideStorageView();
               this.showStorageView();
             }, 1500);
 
-            // Early exit - server had data, we're done
             return;
           }
         } catch (error) {
-          // Server probe failed - likely network error or very first setup
           console.log("[AO3: Script Sync] Server probe failed:", error.message);
         }
 
-        // Step 2: Safety guard - prevent empty initialization
-        // Only block if user has no local keys selected (can't upload anything)
         if (selectedKeys.length === 0) {
           const errorMsg =
             serverEnabledKeys.length > 0
@@ -1789,12 +1971,6 @@
           return;
         }
 
-        // Step 3: Server is empty, upload local data (first-time initialization)
-        console.log(
-          "[AO3: Script Sync] Server is empty, initializing with",
-          selectedKeys.length,
-          "local keys",
-        );
         this.showStatus("Uploading local data...", "loading");
         const localData = {};
         selectedKeys.forEach((key) => {
@@ -1804,23 +1980,13 @@
           }
         });
 
-        console.log(
-          "[AO3: Script Sync] Sending initialize request with",
-          Object.keys(localData).length,
-          "keys",
-        );
-
-        // Step 4: Initialize server with current local state
         const initResponse = await this.syncManager.sendSyncRequest({
           action: "initialize",
           initData: localData,
           selectedKeys: selectedKeys,
         });
 
-        console.log("[AO3: Script Sync] Initialize response:", initResponse);
-
         if (initResponse.status === "success") {
-          // Mark as initialized and enable auto-sync by default
           this.storage.saveSetting("syncInitialized", true);
           this.storage.saveSetting("lastSync", Date.now());
           this.storage.saveSetting("syncEnabled", true);
@@ -1828,7 +1994,6 @@
           this.syncManager.settings.lastSync = Date.now();
           this.syncManager.settings.syncEnabled = true;
 
-          // Start sync timer
           this.syncManager.init();
 
           this.showStatus(
@@ -1837,12 +2002,10 @@
           );
           console.log("[AO3: Script Sync] Initialization successful");
 
-          // Show success on button
           if (initBtn) {
             initBtn.value = "✓ Initialized";
           }
 
-          // Refresh the view to show sync options
           setTimeout(() => {
             this.hideStorageView();
             this.showStorageView();
@@ -1915,10 +2078,8 @@
     }
 
     startCountdownUpdater() {
-      // Stop any existing updater
       this.stopCountdownUpdater();
 
-      // Update countdown every second
       this.countdownInterval = setInterval(() => {
         const settings = this.storage.getSettings();
         const lastSyncSpan = q("#ss-last-sync-time");
@@ -1971,7 +2132,6 @@
     }
 
     hideStorageView() {
-      // Stop countdown updater
       this.stopCountdownUpdater();
 
       const container = q("#ss-container");
@@ -1986,7 +2146,6 @@
     }
 
     getScriptSource(key) {
-      // Map keys to known scripts (copied from ao3_import_export_script_storage.js)
       const scriptMap = {
         ao3jail: "various scripts (rate limit tracker)",
         aia_refdate:
@@ -2068,6 +2227,10 @@
           '<a href="https://greasyfork.org/en/scripts/564383">AO3: Quick Hide</a>',
         ao3_skin_switcher_config:
           '<a href="https://greasyfork.org/en/scripts/551820">AO3: Skin Switcher</a>',
+        ao3_skin_switcher_pins:
+          '<a href="https://greasyfork.org/en/scripts/551820">AO3: Skin Switcher</a>',
+        ao3_skin_switcher_cache:
+          '<a href="https://greasyfork.org/en/scripts/551820">AO3: Skin Switcher</a>',
         ao3_no_rekudos_config:
           '<a href="https://greasyfork.org/en/scripts/551623">AO3: No Re-Kudos</a>',
         FT_finished:
@@ -2096,6 +2259,14 @@
           '<a href="https://greasyfork.org/en/scripts/566605">AO3 FicTracker - BlackBatCats Version</a>',
         FT_uiConfig:
           '<a href="https://greasyfork.org/en/scripts/566605">AO3 FicTracker - BlackBatCats Version</a>',
+        FT_lastSyncedUiConfig:
+          '<a href="https://greasyfork.org/en/scripts/566605">AO3 FicTracker - BlackBatCats Version</a>',
+        ao3_custom_favorites_config:
+          '<a href="https://greasyfork.org/en/scripts/582586">AO3: Custom Favorites</a>',
+        ao3_custom_favorites_data:
+          '<a href="https://greasyfork.org/en/scripts/582586">AO3: Custom Favorites</a>',
+        ao3_auto_filters_config:
+          '<a href="https://greasyfork.org/en/scripts/582593">AO3: Auto Filters</a>',
       };
 
       // Check for Script Sync keys
@@ -2103,7 +2274,7 @@
         return '<a href="https://greasyfork.org/en/scripts/568443">AO3: Script Sync</a>';
       }
 
-      // Check for FicTracker custom list keys (e.g. FT_custom_1768174268304)
+      // Check for FicTracker custom list keys
       if (key.startsWith("FT_custom")) {
         return '<a href="https://greasyfork.org/en/scripts/513435">AO3 FicTracker</a>';
       }
@@ -2117,24 +2288,19 @@
   // ============================================================================
 
   function init() {
-    // Inject styles
     StyleManager.inject();
 
-    // Initialize managers
     const storageManager = new StorageManager();
     const remoteSyncManager = new RemoteSyncManager(storageManager);
     const uiManager = new UIManager(storageManager, remoteSyncManager);
 
-    // Initialize sync if enabled
     const settings = storageManager.getSettings();
     if (settings.syncEnabled && settings.syncInitialized) {
       remoteSyncManager.init();
     }
 
-    // Inject menu
     uiManager.injectMenu();
 
-    // Make managers globally accessible for debugging
     window.ScriptSync = {
       storageManager,
       remoteSyncManager,
@@ -2144,7 +2310,6 @@
     console.log("[AO3: Script Sync] loaded.");
   }
 
-  // Start when DOM is ready
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {

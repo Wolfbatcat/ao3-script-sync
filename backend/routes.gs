@@ -5,23 +5,20 @@
 
 /**
  * Handle GET requests
- * Supports: ?action=ping, ?action=get_last_modified
+ * Supports: ?action=ping
  */
 function doGet(e) {
   try {
     const action = e.parameter.action;
-    
+
     if (!action) {
       return createErrorResponse('No action specified', 400);
     }
-    
+
     switch (action) {
       case 'ping':
         return handlePing();
-        
-      case 'get_last_modified':
-        return handleGetLastModified();
-        
+
       default:
         return createErrorResponse('Unknown action: ' + action, 400);
     }
@@ -53,7 +50,7 @@ function doPost(e) {
     
     switch (action) {
       case 'initialize':
-        return handleInitialize(data.initData, data.selectedKeys, data.force || false);
+        return handleInitialize(data.initData, data.selectedKeys);
         
       case 'sync':
         return handleSync(data.queue);
